@@ -230,13 +230,7 @@ src/main/java/com/fja/ai/tinyrag
     ├── DashscopeRerankService.java
     ├── KnowledgeIngestionService.java
     └── RAGService.java
-```
 
-内置前端页面：
-
-- `src/main/resources/static/index.html`
-
----
 
 ## 开发路线图
 
@@ -245,7 +239,7 @@ src/main/java/com/fja/ai/tinyrag
 - [x] 问题改写 + Milvus 检索 + Rerank 重排
 - [x] 基于模板文件的提示词管理
 - [ ] 引入混合检索（向量 + 关键词/BM25）
-- [ ] 增加引用片段高亮与答案可解释性增强
+- [ ] 上下文记忆化管理
 - [ ] 增加离线评测脚本（召回率/准确率）
 - [ ] 增加多知识库权限隔离（企业多租户）
 
@@ -276,22 +270,3 @@ src/main/java/com/fja/ai/tinyrag
 - 复现步骤
 - 期望行为
 - 运行环境（JDK、Milvus、模型配置）
-
----
-
-## 更新日志
-
-### 2026-02-10
-
-- 统一类命名为 `RAG*`（如 `RAGController`、`RAGService`、`RAGConfiguration`）
-- 精简 Controller，流式编排逻辑下沉到 `RAGService`
-- 修复 `TaskExecutor` 多 Bean 注入歧义，使用 `RAGTaskExecutor`
-- 上传链路改为仅文档类型（`DOC`/`DOCX`/`PDF`/`MD`）并使用 `Tika` 解析
-- 前端拆分为「上传文件 / 流式问答」双页签，优化交互与视觉
-- Rerank 对齐百炼原生接口参数，规避 `qwen3-rerank` 兼容模式报错
-
----
-
-## 开源许可证
-
-本项目基于 `Apache License 2.0` 开源，详见 `LICENSE`。
