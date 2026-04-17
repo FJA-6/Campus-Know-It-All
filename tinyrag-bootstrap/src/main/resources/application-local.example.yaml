@@ -1,0 +1,16 @@
+# 本文件是“本地私密配置”的示例。
+# 使用方式：
+# 1) 复制为同目录下的 application-local.yaml
+# 2) 填入你自己的真实密码 / Key
+# 3) application-local.yaml 已在仓库根目录 .gitignore 中忽略，不会被提交
+#
+# 也可用环境变量覆盖（推荐 CI / 服务器使用环境变量）。
+
+spring:
+  datasource:
+    password: ${MYSQL_PASSWORD:your-mysql-password}
+
+  ai:
+    openai:
+      api-key: ${SILICONFLOW_API_KEY:sk-xxxxxxxxxxxxxxxxxxxxxxxx}
+
