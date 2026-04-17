@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>资料上传管理 - 苏州大学校园百事通</title>
+    <style>
+        :root {
+            --primary: #D82E2F;
+            --primary-dark: #9B1C1D;
+            --neutral-50: #FAFAFB;
+            --neutral-100: #F4F4F6;
+            --neutral-200: #E6E7EC;
+            --neutral-600: #5C5F6E;
+            --neutral-800: #1E2030;
+            --radius-md: 14px;
+            --radius-lg: 22px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "DM Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f5f5f7;
+            color: var(--neutral-800);
+            min-height: 100vh;
+            padding: 24px;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background-image: url("/img.png");
+            background-repeat: no-repeat;
+            background-position: center;
+            background-size: min(72vw, 980px) auto;
+            opacity: 0.06;
+            pointer-events: none;
+            /* 顶层水印：不挡交互，但始终可见 */
+            z-index: 9999;
+        }
+
+        .page {
+            max-width: 920px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            border-radius: 24px;
+            padding: 28px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .title { font-size: 24px; font-weight: 700; }
+        .desc { color: var(--neutral-600); font-size: 14px; line-height: 1.7; margin-bottom: 20px; }
+
+        .btn {
+            border: none;
+            border-radius: var(--radius-md);
+            padding: 11px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .btn-primary {
+            color: #fff;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+        }
+        .btn-secondary {
+            background: #fff;
+            color: var(--neutral-600);
+            border: 1px solid var(--neutral-200);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .group { display: flex; flex-direction: column; gap: 8px; }
+        .group label { font-size: 12px; color: var(--neutral-600); font-weight: 700; }
+        .group input {
+            height: 44px;
+            padding: 0 12px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--neutral-200);
+            font-size: 14px;
+        }
+
+        .drop-zone {
+            border: 2px dashed rgba(216, 46, 47, 0.22);
+            border-radius: var(--radius-lg);
+            padding: 28px 16px;
+            text-align: center;
+            background: var(--neutral-50);
+            cursor: pointer;
+            line-height: 1.6;
+            min-height: 120px;
+        }
+        .drop-zone.dragover { border-color: var(--primary); background: #fff1f1; }
+        .helper { font-size: 12px; color: var(--neutral-600); margin-top: 8px; }
+        .file-chip {
+            margin-top: 10px;
+            display: inline-flex;
+            border: 1px solid rgba(216, 46, 47, 0.2);
+            background: #fff3f3;
+            color: var(--primary-dark);
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+        }
+
+        .actions { display: flex; gap: 8px; margin-bottom: 14px; }
+        .result {
+            border: 1px solid var(--neutral-200);
+            border-radius: var(--radius-md);
+            background: #fff;
+            min-height: 64px;
+            padding: 14px;
+            white-space: pre-wrap;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 12px; }
+            .page { padding: 18px; }
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <div class="topbar">
+        <h1 class="title">资料上传管理</h1>
+        <div style="display:flex; gap:8px;">
+            <button id="logoutBtn" class="btn btn-secondary" type="button">退出</button>
+            <a class="btn btn-secondary" href="/index.html">返回聊天页</a>
+        </div>
+    </div>
+    <p class="desc">管理员可在此上传 DOC、DOCX、PDF、MD 资料。上传后将自动解析并写入向量库。</p>
+
+    <div class="grid">
+        <div class="group">
+            <label for="uploadKb">资料库（kb）</label>
+            <input id="uploadKb" placeholder="例如：hr" value="default">
+        </div>
+        <div class="group">
+            <label>选择文件</label>
+            <div id="dropZone" class="drop-zone">
+                拖拽文件到这里，或点击选择文件
+                <div class="helper">仅支持：DOC、DOCX、PDF、MD</div>
+            </div>
+            <input id="uploadFile" type="file" accept=".doc,.docx,.pdf,.md,.markdown" hidden>
+            <div id="fileChipContainer"></div>
+        </div>
+    </div>
+
+    <div class="actions">
+        <button id="uploadBtn" class="btn btn-primary" type="button">上传并向量化</button>
+        <button id="clearUploadBtn" class="btn btn-secondary" type="button">清空选择</button>
+    </div>
+
+    <div id="uploadResult" class="result">等待上传...</div>
+</main>
+
+<script>
+    const ALLOWED_EXTENSIONS = new Set(['doc', 'docx', 'pdf', 'md', 'markdown']);
+    const uploadBtn = document.getElementById('uploadBtn');
+    const clearUploadBtn = document.getElementById('clearUploadBtn');
+    const uploadInput = document.getElementById('uploadFile');
+    const uploadKbInput = document.getElementById('uploadKb');
+    const uploadResult = document.getElementById('uploadResult');
+    const dropZone = document.getElementById('dropZone');
+    const fileChipContainer = document.getElementById('fileChipContainer');
+    const logoutBtn = document.getElementById('logoutBtn');
+
+    function ragApi(path) {
+        const ctx = typeof window.__CONTEXT_PATH__ === 'string' ? window.__CONTEXT_PATH__.replace(/\/$/, '') : '';
+        return `${ctx}${path}`;
+    }
+
+    async function initAuthGuard() {
+        try {
+            const res = await fetch(ragApi('/api/auth/me'), { headers: { Accept: 'application/json' } });
+            if (!res.ok) {
+                window.location.href = '/login.html';
+            }
+        } catch {
+            window.location.href = '/login.html';
+        }
+    }
+
+    function renderSelectedFile() {
+        fileChipContainer.innerHTML = '';
+        if (!uploadInput.files.length) return;
+
+        const file = uploadInput.files[0];
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!ALLOWED_EXTENSIONS.has(ext)) {
+            alert('不支持的文件格式');
+            uploadInput.value = '';
+            return;
+        }
+
+        const chip = document.createElement('div');
+        chip.className = 'file-chip';
+        chip.textContent = `${file.name} (${(file.size / 1024).toFixed(1)}KB)`;
+        fileChipContainer.appendChild(chip);
+    }
+
+    function clearUploadSelection() {
+        uploadInput.value = '';
+        fileChipContainer.innerHTML = '';
+        uploadResult.textContent = '等待上传...';
+    }
+
+    async function handleUpload() {
+        if (!uploadInput.files?.length) {
+            alert('请先选择文件');
+            return;
+        }
+        const kb = (uploadKbInput.value || 'default').trim() || 'default';
+        const fd = new FormData();
+        fd.append('file', uploadInput.files[0]);
+        fd.append('kb', kb);
+
+        uploadBtn.disabled = true;
+        uploadResult.textContent = '正在上传并向量化，请稍候…';
+        try {
+            const res = await fetch(ragApi('/api/rag/knowledge/upload'), { method: 'POST', body: fd });
+            const text = await res.text();
+            if (!res.ok) {
+                let msg = text || res.statusText;
+                try {
+                    const j = JSON.parse(text);
+                    if (j.message) msg = j.message;
+                } catch {}
+                uploadResult.textContent = `上传失败（${res.status}）：${msg}`;
+                return;
+            }
+            const data = JSON.parse(text);
+            uploadResult.textContent =
+                `上传成功：文件「${data.fileName}」已写入知识库「${data.kb}」，共切分 ${data.chunkCount} 条向量。`;
+        } catch (err) {
+            uploadResult.textContent = `请求失败：${err.message || err}`;
+        } finally {
+            uploadBtn.disabled = false;
+        }
+    }
+
+    dropZone.addEventListener('click', () => uploadInput.click());
+    uploadInput.addEventListener('change', renderSelectedFile);
+    dropZone.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (event) => {
+        event.preventDefault();
+        dropZone.classList.remove('dragover');
+        if (!event.dataTransfer?.files?.length) return;
+        uploadInput.files = event.dataTransfer.files;
+        renderSelectedFile();
+    });
+
+    uploadBtn.addEventListener('click', handleUpload);
+    clearUploadBtn.addEventListener('click', clearUploadSelection);
+    logoutBtn.addEventListener('click', async () => {
+        try {
+            await fetch(ragApi('/api/auth/logout'), { method: 'POST' });
+        } catch {}
+        window.location.href = '/login.html';
+    });
+    initAuthGuard();
+</script>
+</body>
+</html>

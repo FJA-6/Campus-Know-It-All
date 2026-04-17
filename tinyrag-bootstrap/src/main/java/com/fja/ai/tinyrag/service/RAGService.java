@@ -1,0 +1,311 @@
+package com.fja.ai.tinyrag.service;
+
+import com.fja.ai.tinyrag.config.RAGProperties;
+import com.fja.ai.tinyrag.model.RAGRequest;
+import com.fja.ai.tinyrag.service.RerankService.RerankItem;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.core.io.Resource;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+@Slf4j
+@Service
+public class RAGService {
+
+    private final ChatClient chatClient;
+    private final VectorStore vectorStore;
+    private final RAGProperties ragProperties;
+    private final RerankService rerankService;
+    private final TaskExecutor taskExecutor;
+    private final Resource rewriteSystemPrompt;
+    private final Resource rewriteUserPrompt;
+    private final Resource answerSystemPrompt;
+    private final Resource answerUserPrompt;
+
+    public RAGService(ChatClient chatClient,
+                      VectorStore vectorStore,
+                      RAGProperties ragProperties,
+                      RerankService rerankService,
+                      @Qualifier("RAGTaskExecutor") TaskExecutor taskExecutor,
+                      @Value("classpath:/prompts/rewrite-system.st") Resource rewriteSystemPrompt,
+                      @Value("classpath:/prompts/rewrite-user.st") Resource rewriteUserPrompt,
+                      @Value("classpath:/prompts/answer-system.st") Resource answerSystemPrompt,
+                      @Value("classpath:/prompts/answer-user.st") Resource answerUserPrompt) {
+        this.chatClient = chatClient;
+        this.vectorStore = vectorStore;
+        this.ragProperties = ragProperties;
+        this.rerankService = rerankService;
+        this.taskExecutor = taskExecutor;
+        this.rewriteSystemPrompt = rewriteSystemPrompt;
+        this.rewriteUserPrompt = rewriteUserPrompt;
+        this.answerSystemPrompt = answerSystemPrompt;
+        this.answerUserPrompt = answerUserPrompt;
+    }
+
+    public SseEmitter streamChat(RAGRequest request) {
+        SseEmitter emitter = new SseEmitter(0L);
+
+        taskExecutor.execute(() -> {
+            try {
+                RAGExecutionContext context = prepareContext(request);
+                sendEvent(emitter, "meta", Map.of("rewrittenQuestion", context.rewrittenQuestion()));
+                Map<String, Object> refsPayload = new LinkedHashMap<>();
+                refsPayload.put("references", context.references());
+                refsPayload.put("chunks", refChunksFromDocs(context.rerankedDocs()));
+                sendEvent(emitter, "refs", refsPayload);
+
+                streamAnswer(request.getQuestion(), context.rerankedDocs(),
+                        token -> sendEvent(emitter, "token", token));
+
+                sendEvent(emitter, "done", "[DONE]");
+                emitter.complete();
+            } catch (Exception ex) {
+                try {
+                    sendEvent(emitter, "error", ex.getMessage() == null ? "stream error" : ex.getMessage());
+                } catch (Exception ignored) {
+                }
+                emitter.completeWithError(ex);
+            }
+        });
+
+        return emitter;
+    }
+
+    public String rewriteQuestion(String originalQuestion) {
+        String rewrite = chatClient.prompt()
+                .system(system -> system.text(rewriteSystemPrompt))
+                .user(u -> u.text(rewriteUserPrompt)
+                        .param("question", originalQuestion))
+                .call()
+                .content();
+
+        if (rewrite == null || rewrite.isBlank()) {
+            return originalQuestion;
+        }
+        return rewrite.trim();
+    }
+
+    public List<Document> retrieveCandidates(String rewrittenQuestion, String kb, int topK) {
+        SearchRequest.Builder builder = SearchRequest.builder()
+                .query(rewrittenQuestion)
+                .topK(topK)
+                .similarityThresholdAll();
+
+        if (kb != null && !kb.isBlank()) {
+            builder.filterExpression("kb == '" + escapeForFilter(kb) + "'");
+        }
+
+        return vectorStore.similaritySearch(builder.build());
+    }
+
+    public List<Document> rerank(String originalQuestion, List<Document> candidates, int topN) {
+        if (candidates == null || candidates.isEmpty()) {
+            return List.of();
+        }
+
+        int safeTopN = Math.max(1, topN);
+        List<Document> validCandidates = new ArrayList<>();
+        List<String> candidateTexts = new ArrayList<>();
+        for (Document candidate : candidates) {
+            String text = safeText(candidate);
+            if (text.isBlank()) {
+                continue;
+            }
+            validCandidates.add(candidate);
+            candidateTexts.add(truncate(text, ragProperties.getRerankMaxDocumentChars()));
+        }
+
+        if (validCandidates.isEmpty()) {
+            return List.of();
+        }
+
+        try {
+            List<RerankItem> rerankResults = rerankService.rerank(originalQuestion, candidateTexts, safeTopN);
+            List<Document> reranked = pickByRerankResults(validCandidates, rerankResults, safeTopN);
+            if (!reranked.isEmpty()) {
+                return reranked;
+            }
+        } catch (Exception ex) {
+            log.warn("Rerank failed, fallback to vector score. reason={}", ex.getMessage());
+        }
+
+        return fallbackByVectorScore(validCandidates, safeTopN);
+    }
+
+    public void streamAnswer(String question, List<Document> rerankedDocs, Consumer<String> tokenConsumer) {
+        String context = buildContext(rerankedDocs);
+        chatClient.prompt()
+                .system(system -> system.text(answerSystemPrompt))
+                .user(u -> u.text(answerUserPrompt)
+                        .param("question", question)
+                        .param("context", context))
+                .stream()
+                .content()
+                .doOnNext(tokenConsumer)
+                .blockLast();
+    }
+
+    public List<String> references(List<Document> docs) {
+        return docs.stream()
+                .map(this::referenceFromMetadata)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+    }
+
+    /** SSE / 前端展示：每条命中的来源标签与正文片段 */
+    private List<Map<String, String>> refChunksFromDocs(List<Document> docs) {
+        if (docs == null || docs.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, String>> out = new ArrayList<>();
+        for (Document doc : docs) {
+            Map<String, String> row = new LinkedHashMap<>();
+            String src = referenceFromMetadata(doc);
+            row.put("source", src != null ? src : "");
+            row.put("text", truncate(safeText(doc), 4000));
+            out.add(row);
+        }
+        return out;
+    }
+
+    private RAGExecutionContext prepareContext(RAGRequest request) {
+        String rewritten = rewriteQuestion(request.getQuestion());
+        String kb = request.getKb();
+
+        List<Document> candidates = retrieveCandidates(rewritten, kb, ragProperties.getRetrieveTopK());
+        List<Document> reranked = rerank(request.getQuestion(), candidates, ragProperties.getRerankTopN());
+        List<String> refs = references(reranked);
+        return new RAGExecutionContext(rewritten, reranked, refs);
+    }
+
+    private void sendEvent(SseEmitter emitter, String event, Object data) {
+        try {
+            emitter.send(SseEmitter.event().name(event).data(data));
+        } catch (IOException ex) {
+            throw new IllegalStateException("SSE 发送失败", ex);
+        }
+    }
+
+    private List<Document> pickByRerankResults(List<Document> candidates, List<RerankItem> results, int topN) {
+        if (results == null || results.isEmpty()) {
+            return List.of();
+        }
+
+        List<Document> picked = new ArrayList<>();
+        Set<Integer> seen = new LinkedHashSet<>();
+        for (RerankItem result : results) {
+            int index = result.index();
+            if (index < 0 || index >= candidates.size()) {
+                continue;
+            }
+            if (!seen.add(index)) {
+                continue;
+            }
+            picked.add(candidates.get(index));
+            if (picked.size() >= topN) {
+                break;
+            }
+        }
+        return picked;
+    }
+
+    private List<Document> fallbackByVectorScore(List<Document> candidates, int topN) {
+        return candidates.stream()
+                .sorted(Comparator.comparingDouble(this::vectorScore).reversed())
+                .limit(topN)
+                .toList();
+    }
+
+    private double vectorScore(Document document) {
+        if (document == null || document.getScore() == null) {
+            return 0.0;
+        }
+        return document.getScore();
+    }
+
+    private String buildContext(List<Document> docs) {
+        if (docs == null || docs.isEmpty()) {
+            return "(无可用知识片段)";
+        }
+
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < docs.size(); i++) {
+            Document doc = docs.get(i);
+            builder.append("[片段").append(i + 1).append("]\n");
+            builder.append(safeText(doc)).append("\n");
+            String ref = referenceFromMetadata(doc);
+            if (ref != null) {
+                builder.append("来源：").append(ref).append("\n");
+            }
+            builder.append("\n");
+        }
+        return builder.toString();
+    }
+
+    private String referenceFromMetadata(Document doc) {
+        Map<String, Object> metadata = doc.getMetadata();
+        if (metadata.isEmpty()) {
+            return null;
+        }
+
+        Object source = metadata.get("source");
+        if (source == null) {
+            source = metadata.get("filename");
+        }
+        if (source == null) {
+            source = metadata.get("file_name");
+        }
+
+        Object chunkIndex = metadata.get("chunk_index");
+        if (source == null) {
+            return null;
+        }
+
+        if (chunkIndex == null) {
+            return source.toString();
+        }
+        return source + "#chunk-" + chunkIndex;
+    }
+
+    private String safeText(Document document) {
+        if (document == null || document.getText() == null) {
+            return "";
+        }
+        return document.getText().trim();
+    }
+
+    private String truncate(String value, int maxLen) {
+        if (value == null || value.length() <= maxLen) {
+            return value;
+        }
+        return value.substring(0, maxLen);
+    }
+
+    private String escapeForFilter(String kb) {
+        return kb.replace("'", "\\'");
+    }
+
+    private record RAGExecutionContext(String rewrittenQuestion, List<Document> rerankedDocs, List<String> references) {
+    }
+}

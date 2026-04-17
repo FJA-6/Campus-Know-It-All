@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 校园百事通</title>
+    <style>
+        :root {
+            --primary: #D82E2F;
+            --primary-dark: #9B1C1D;
+            --neutral-100: #F4F4F6;
+            --neutral-200: #E6E7EC;
+            --neutral-600: #5C5F6E;
+            --neutral-800: #1E2030;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 16px;
+            font-family: "DM Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f5f5f7;
+            color: var(--neutral-800);
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background-image: url("/img.png");
+            background-repeat: no-repeat;
+            background-position: center;
+            background-size: min(74vw, 960px) auto;
+            opacity: 0.06;
+            pointer-events: none;
+            /* 顶层水印：不挡交互，但始终可见 */
+            z-index: 9999;
+        }
+        .card {
+            width: min(420px, 100%);
+            background: #fff;
+            border: 1px solid rgba(0,0,0,0.06);
+            border-radius: 18px;
+            padding: 22px;
+            position: relative;
+            z-index: 1;
+        }
+        h1 { font-size: 24px; margin-bottom: 6px; }
+        .sub { color: var(--neutral-600); font-size: 13px; margin-bottom: 18px; }
+        .switch {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            background: var(--neutral-100);
+            border-radius: 10px;
+            padding: 4px;
+            gap: 4px;
+            margin-bottom: 14px;
+        }
+        .switch button {
+            border: none;
+            height: 36px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            background: transparent;
+            color: var(--neutral-600);
+        }
+        .switch button.active {
+            background: #fff;
+            color: var(--neutral-800);
+            border: 1px solid var(--neutral-200);
+        }
+        .group { margin-bottom: 12px; }
+        label { display: block; margin-bottom: 6px; font-size: 12px; color: var(--neutral-600); }
+        input {
+            width: 100%;
+            height: 42px;
+            border: 1px solid var(--neutral-200);
+            border-radius: 10px;
+            padding: 0 12px;
+            font-size: 14px;
+        }
+        .btn {
+            width: 100%;
+            border: none;
+            border-radius: 10px;
+            height: 42px;
+            color: #fff;
+            font-weight: 700;
+            cursor: pointer;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            margin-top: 4px;
+        }
+        .msg {
+            margin-top: 12px;
+            min-height: 20px;
+            font-size: 13px;
+            color: var(--neutral-600);
+        }
+        .msg.error { color: #B91C1C; }
+        .msg.ok { color: #15803D; }
+    </style>
+</head>
+<body>
+<main class="card">
+    <h1>校园百事通</h1>
+    <p class="sub">请先登录后再使用聊天和知识库功能</p>
+
+    <div class="switch">
+        <button id="modeLogin" class="active" type="button">登录</button>
+        <button id="modeRegister" type="button">注册</button>
+    </div>
+
+    <div class="group">
+        <label for="username">用户名</label>
+        <input id="username" type="text" placeholder="请输入用户名（3-64位）" autocomplete="username">
+    </div>
+    <div class="group">
+        <label for="password">密码</label>
+        <input id="password" type="password" placeholder="请输入密码（至少6位）" autocomplete="current-password">
+    </div>
+    <button id="submitBtn" class="btn" type="button">登录</button>
+    <div id="msg" class="msg"></div>
+</main>
+
+<script>
+    let mode = 'login';
+    const modeLogin = document.getElementById('modeLogin');
+    const modeRegister = document.getElementById('modeRegister');
+    const submitBtn = document.getElementById('submitBtn');
+    const usernameInput = document.getElementById('username');
+    const passwordInput = document.getElementById('password');
+    const msgEl = document.getElementById('msg');
+
+    function setMode(next) {
+        mode = next;
+        modeLogin.classList.toggle('active', mode === 'login');
+        modeRegister.classList.toggle('active', mode === 'register');
+        submitBtn.textContent = mode === 'login' ? '登录' : '注册并登录';
+        msgEl.textContent = '';
+        msgEl.className = 'msg';
+    }
+
+    function showMsg(text, isError) {
+        msgEl.textContent = text || '';
+        msgEl.className = isError ? 'msg error' : 'msg ok';
+    }
+
+    async function checkLoggedIn() {
+        try {
+            const res = await fetch('/api/auth/me', { headers: { Accept: 'application/json' } });
+            if (res.ok) {
+                window.location.href = '/index.html';
+            }
+        } catch {}
+    }
+
+    async function submitAuth() {
+        const username = usernameInput.value.trim();
+        const password = passwordInput.value;
+        if (!username || !password) {
+            showMsg('请输入用户名和密码', true);
+            return;
+        }
+        submitBtn.disabled = true;
+        showMsg('提交中...', false);
+        try {
+            const path = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
+            const res = await fetch(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const text = await res.text();
+            let data = {};
+            try { data = JSON.parse(text); } catch {}
+            if (!res.ok) {
+                showMsg(data.message || `请求失败（${res.status}）`, true);
+                return;
+            }
+            showMsg(data.message || '成功', false);
+            window.location.href = '/index.html';
+        } catch (err) {
+            showMsg(err.message || '网络异常', true);
+        } finally {
+            submitBtn.disabled = false;
+        }
+    }
+
+    modeLogin.addEventListener('click', () => setMode('login'));
+    modeRegister.addEventListener('click', () => setMode('register'));
+    submitBtn.addEventListener('click', submitAuth);
+    passwordInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitAuth();
+    });
+
+    checkLoggedIn();
+</script>
+</body>
+</html>

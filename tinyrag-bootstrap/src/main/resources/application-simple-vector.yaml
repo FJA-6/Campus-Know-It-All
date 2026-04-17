@@ -1,0 +1,6 @@
+# 与 profile simple-vector 一起使用：排除 Milvus 自动配置，改用语义见主 application.yaml 顶部说明
+
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.vectorstore.milvus.autoconfigure.MilvusVectorStoreAutoConfiguration
