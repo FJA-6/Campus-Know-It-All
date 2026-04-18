@@ -1,6 +1,7 @@
 package com.fja.ai.tinyrag.config;
 
 import io.modelcontextprotocol.client.McpSyncClient;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
@@ -16,10 +17,12 @@ import java.util.List;
 
 @Configuration
 @EnableConfigurationProperties(RAGProperties.class)
+@Slf4j
 public class RAGConfiguration {
 
     @Bean
     public ChatClient chatClient(ChatModel chatModel, List<McpSyncClient> mcpSyncClients) {
+        log.info("MCP sync clients loaded: {}", mcpSyncClients == null ? 0 : mcpSyncClients.size());
         SyncMcpToolCallbackProvider toolCallbackProvider = SyncMcpToolCallbackProvider.builder()
                 .mcpClients(mcpSyncClients)
                 .build();

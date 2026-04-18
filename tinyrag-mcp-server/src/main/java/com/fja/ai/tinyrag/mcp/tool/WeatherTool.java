@@ -2,6 +2,7 @@ package com.fja.ai.tinyrag.mcp.tool;
 
 import org.springaicommunity.mcp.annotation.McpTool;
 import org.springaicommunity.mcp.annotation.McpToolParam;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
@@ -14,6 +15,7 @@ import java.util.Random;
  * 天气查询工具
  */
 @Component
+@Slf4j
 public class WeatherTool {
 
     private static final Random RANDOM = new Random();
@@ -30,6 +32,7 @@ public class WeatherTool {
             @McpToolParam(required = false, description = "查询天数，1-7天，默认为1天")
             Integer days
     ) {
+        log.info("MCP Tool invoked: queryWeatherForecast location={}, days={}", location, days);
         int queryDays = days != null ? days : 1;
 
         if (queryDays < 1 || queryDays > 7) {

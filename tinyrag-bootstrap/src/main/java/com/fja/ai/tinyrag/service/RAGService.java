@@ -3,6 +3,10 @@ package com.fja.ai.tinyrag.service;
 import com.fja.ai.tinyrag.config.RAGProperties;
 import com.fja.ai.tinyrag.model.RAGRequest;
 import com.fja.ai.tinyrag.service.RerankService.RerankItem;
+import com.fja.ai.tinyrag.service.query.QueryRouter;
+import com.fja.ai.tinyrag.service.query.QueryRoutingDecision;
+import com.fja.ai.tinyrag.service.web.WebSearchService;
+import com.fja.ai.tinyrag.service.web.WebSearchService.WebResult;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -37,6 +41,8 @@ public class RAGService {
     private final RAGProperties ragProperties;
     private final RerankService rerankService;
     private final TaskExecutor taskExecutor;
+    private final QueryRouter queryRouter;
+    private final WebSearchService webSearchService;
     private final Resource rewriteSystemPrompt;
     private final Resource rewriteUserPrompt;
     private final Resource answerSystemPrompt;
@@ -47,6 +53,8 @@ public class RAGService {
                       RAGProperties ragProperties,
                       RerankService rerankService,
                       @Qualifier("RAGTaskExecutor") TaskExecutor taskExecutor,
+                      QueryRouter queryRouter,
+                      WebSearchService webSearchService,
                       @Value("classpath:/prompts/rewrite-system.st") Resource rewriteSystemPrompt,
                       @Value("classpath:/prompts/rewrite-user.st") Resource rewriteUserPrompt,
                       @Value("classpath:/prompts/answer-system.st") Resource answerSystemPrompt,
@@ -56,6 +64,8 @@ public class RAGService {
         this.ragProperties = ragProperties;
         this.rerankService = rerankService;
         this.taskExecutor = taskExecutor;
+        this.queryRouter = queryRouter;
+        this.webSearchService = webSearchService;
         this.rewriteSystemPrompt = rewriteSystemPrompt;
         this.rewriteUserPrompt = rewriteUserPrompt;
         this.answerSystemPrompt = answerSystemPrompt;
@@ -68,7 +78,14 @@ public class RAGService {
         taskExecutor.execute(() -> {
             try {
                 RAGExecutionContext context = prepareContext(request);
-                sendEvent(emitter, "meta", Map.of("rewrittenQuestion", context.rewrittenQuestion()));
+                sendEvent(emitter, "meta", Map.of(
+                        "rewrittenQuestion", context.rewrittenQuestion(),
+                        "routeReason", context.routeReason(),
+                        "usedWebSearch", context.usedWebSearch(),
+                        "ragDocsCount", context.ragDocsCount(),
+                        "webResultsCount", context.webResultsCount(),
+                        "webFallbackReason", context.webFallbackReason()
+                ));
                 Map<String, Object> refsPayload = new LinkedHashMap<>();
                 refsPayload.put("references", context.references());
                 refsPayload.put("chunks", refChunksFromDocs(context.rerankedDocs()));
@@ -190,13 +207,58 @@ public class RAGService {
     }
 
     private RAGExecutionContext prepareContext(RAGRequest request) {
-        String rewritten = rewriteQuestion(request.getQuestion());
+        String originalQuestion = request.getQuestion();
+        String rewritten = rewriteQuestion(originalQuestion);
         String kb = request.getKb();
 
-        List<Document> candidates = retrieveCandidates(rewritten, kb, ragProperties.getRetrieveTopK());
-        List<Document> reranked = rerank(request.getQuestion(), candidates, ragProperties.getRerankTopN());
+        QueryRoutingDecision routing = queryRouter.route(originalQuestion);
+
+        List<Document> reranked = List.of();
+        int ragDocsCount = 0;
+        if (routing.useRag()) {
+            List<Document> candidates = retrieveCandidates(rewritten, kb, ragProperties.getRetrieveTopK());
+            reranked = rerank(originalQuestion, candidates, ragProperties.getRerankTopN());
+            ragDocsCount = reranked == null ? 0 : reranked.size();
+        }
+
+        boolean needWebFallback = shouldWebFallback(routing, reranked);
+        boolean usedWeb = false;
+        int webCount = 0;
+        String webReason = needWebFallback ? "triggered-by-policy" : "not-triggered";
+        if (needWebFallback) {
+            log.info("RAG: web fallback triggered. routeReason={}, allowWeb={}, allowAutoOnEmpty={}, ragDocsCount={}",
+                    routing == null ? null : routing.reason(),
+                    routing != null && routing.allowWeb(),
+                    Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag()),
+                    ragDocsCount);
+            List<WebResult> web = webSearchService.search(rewritten, ragProperties.getWebSearchMaxResults());
+            if (web != null && !web.isEmpty()) {
+                usedWeb = true;
+                webCount = web.size();
+                List<Document> webDocs = webResultsToDocs(web);
+                // 若 RAG 有命中但质量一般，则把联网结果作为补充；若无命中，则直接用联网结果
+                if (reranked == null || reranked.isEmpty()) {
+                    reranked = webDocs;
+                } else {
+                    List<Document> merged = new ArrayList<>(reranked.size() + webDocs.size());
+                    merged.addAll(reranked);
+                    merged.addAll(webDocs);
+                    reranked = merged;
+                }
+            } else {
+                webReason = "web-search-returned-empty";
+                log.warn("RAG: web fallback executed but returned empty results. rewrittenQuestion='{}'", rewritten);
+            }
+        }
+
         List<String> refs = references(reranked);
-        return new RAGExecutionContext(rewritten, reranked, refs);
+        return new RAGExecutionContext(rewritten, reranked, refs,
+                routing == null ? null : routing.reason(),
+                usedWeb,
+                ragDocsCount,
+                webCount,
+                webReason
+        );
     }
 
     private void sendEvent(SseEmitter emitter, String event, Object data) {
@@ -306,6 +368,118 @@ public class RAGService {
         return kb.replace("'", "\\'");
     }
 
-    private record RAGExecutionContext(String rewrittenQuestion, List<Document> rerankedDocs, List<String> references) {
+    private boolean shouldWebFallback(QueryRoutingDecision routing, List<Document> rerankedDocs) {
+        if (!Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled())) {
+            return false;
+        }
+
+        boolean allowWeb = routing != null && routing.allowWeb();
+        boolean allowAutoOnEmpty = Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag());
+
+        if (rerankedDocs == null || rerankedDocs.isEmpty()) {
+            return allowWeb || allowAutoOnEmpty;
+        }
+
+        Double minScore = ragProperties.getRagMinTopScore();
+        if (minScore == null) {
+            return allowWeb;
+        }
+        double top = topScore(rerankedDocs);
+        // 若拿不到分数（全是 0），只在用户显式 web-hint 时回退，避免无意义联网
+        if (top <= 0.0) {
+            return allowWeb;
+        }
+        return top < minScore && allowWeb;
+    }
+
+    private double topScore(List<Document> docs) {
+        double top = 0.0;
+        for (Document d : docs) {
+            double s = vectorScore(d);
+            if (s > top) {
+                top = s;
+            }
+        }
+        return top;
+    }
+
+    private List<Document> webResultsToDocs(List<WebResult> results) {
+        if (results == null || results.isEmpty()) {
+            return List.of();
+        }
+        List<Document> docs = new ArrayList<>();
+        int i = 0;
+        for (WebResult r : results) {
+            if (r == null || r.snippet() == null || r.snippet().isBlank()) {
+                continue;
+            }
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("source", r.url() == null || r.url().isBlank() ? r.source() : r.url());
+            meta.put("origin", "web");
+            meta.put("chunk_index", i++);
+            docs.add(new Document(r.snippet().trim(), meta));
+        }
+        return docs;
+    }
+
+    private static class RAGExecutionContext {
+        private final String rewrittenQuestion;
+        private final List<Document> rerankedDocs;
+        private final List<String> references;
+        private final String routeReason;
+        private final boolean usedWebSearch;
+        private final int ragDocsCount;
+        private final int webResultsCount;
+        private final String webFallbackReason;
+
+        private RAGExecutionContext(String rewrittenQuestion,
+                                    List<Document> rerankedDocs,
+                                    List<String> references,
+                                    String routeReason,
+                                    boolean usedWebSearch,
+                                    int ragDocsCount,
+                                    int webResultsCount,
+                                    String webFallbackReason) {
+            this.rewrittenQuestion = rewrittenQuestion;
+            this.rerankedDocs = rerankedDocs;
+            this.references = references;
+            this.routeReason = routeReason;
+            this.usedWebSearch = usedWebSearch;
+            this.ragDocsCount = ragDocsCount;
+            this.webResultsCount = webResultsCount;
+            this.webFallbackReason = webFallbackReason;
+        }
+
+        public String rewrittenQuestion() {
+            return rewrittenQuestion;
+        }
+
+        public List<Document> rerankedDocs() {
+            return rerankedDocs;
+        }
+
+        public List<String> references() {
+            return references;
+        }
+
+        public String routeReason() {
+            return routeReason;
+        }
+
+        public boolean usedWebSearch() {
+            return usedWebSearch;
+        }
+
+        public int ragDocsCount() {
+            return ragDocsCount;
+        }
+
+        public int webResultsCount() {
+            return webResultsCount;
+        }
+
+        public String webFallbackReason() {
+            return webFallbackReason;
+        }
     }
 }
