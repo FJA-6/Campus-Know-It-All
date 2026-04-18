@@ -116,11 +116,12 @@ public class RAGService {
         return emitter;
     }
 
-    public String rewriteQuestion(String originalQuestion) {
+    public String rewriteQuestion(String originalQuestion, String historyText) {
         String rewrite = chatClient.prompt()
                 .system(system -> system.text(rewriteSystemPrompt))
                 .user(u -> u.text(rewriteUserPrompt)
-                        .param("question", originalQuestion))
+                        .param("question", originalQuestion)
+                        .param("history", historyText == null || historyText.isBlank() ? "(无历史对话)" : historyText))
                 .call()
                 .content();
 
@@ -217,11 +218,11 @@ public class RAGService {
 
     private RAGExecutionContext prepareContext(RAGRequest request) {
         String originalQuestion = request.getQuestion();
-        String rewritten = rewriteQuestion(originalQuestion);
-        String kb = request.getKb();
         Long sessionId = request.getSessionId();
         String historyText = buildHistoryText(sessionId);
         int historyTurns = countHistoryTurns(sessionId);
+        String rewritten = rewriteQuestion(originalQuestion, historyText);
+        String kb = request.getKb();
 
         QueryRoutingDecision routing = queryRouter.route(originalQuestion);
 
