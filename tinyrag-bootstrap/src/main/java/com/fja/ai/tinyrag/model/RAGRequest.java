@@ -12,4 +12,9 @@ public class RAGRequest {
     private String question;
 
     private String kb;
+
+    /**
+     * 可选：会话 ID，用于拼接最近历史记忆（最近 5 轮问答）。
+     */
+    private Long sessionId;
 }

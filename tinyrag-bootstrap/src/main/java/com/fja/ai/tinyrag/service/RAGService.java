@@ -1,5 +1,8 @@
 package com.fja.ai.tinyrag.service;
 
+import com.fja.ai.tinyrag.chat.ChatMessage;
+import com.fja.ai.tinyrag.chat.ChatMessageRepository;
+import com.fja.ai.tinyrag.chat.MessageRole;
 import com.fja.ai.tinyrag.config.RAGProperties;
 import com.fja.ai.tinyrag.model.RAGRequest;
 import com.fja.ai.tinyrag.service.RerankService.RerankItem;
@@ -16,6 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Collections;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -43,6 +47,7 @@ public class RAGService {
     private final TaskExecutor taskExecutor;
     private final QueryRouter queryRouter;
     private final WebSearchService webSearchService;
+    private final ChatMessageRepository chatMessageRepository;
     private final Resource rewriteSystemPrompt;
     private final Resource rewriteUserPrompt;
     private final Resource answerSystemPrompt;
@@ -55,6 +60,7 @@ public class RAGService {
                       @Qualifier("RAGTaskExecutor") TaskExecutor taskExecutor,
                       QueryRouter queryRouter,
                       WebSearchService webSearchService,
+                      ChatMessageRepository chatMessageRepository,
                       @Value("classpath:/prompts/rewrite-system.st") Resource rewriteSystemPrompt,
                       @Value("classpath:/prompts/rewrite-user.st") Resource rewriteUserPrompt,
                       @Value("classpath:/prompts/answer-system.st") Resource answerSystemPrompt,
@@ -66,6 +72,7 @@ public class RAGService {
         this.taskExecutor = taskExecutor;
         this.queryRouter = queryRouter;
         this.webSearchService = webSearchService;
+        this.chatMessageRepository = chatMessageRepository;
         this.rewriteSystemPrompt = rewriteSystemPrompt;
         this.rewriteUserPrompt = rewriteUserPrompt;
         this.answerSystemPrompt = answerSystemPrompt;
@@ -84,14 +91,15 @@ public class RAGService {
                         "usedWebSearch", context.usedWebSearch(),
                         "ragDocsCount", context.ragDocsCount(),
                         "webResultsCount", context.webResultsCount(),
-                        "webFallbackReason", context.webFallbackReason()
+                        "webFallbackReason", context.webFallbackReason(),
+                        "historyTurns", context.historyTurns()
                 ));
                 Map<String, Object> refsPayload = new LinkedHashMap<>();
                 refsPayload.put("references", context.references());
                 refsPayload.put("chunks", refChunksFromDocs(context.rerankedDocs()));
                 sendEvent(emitter, "refs", refsPayload);
 
-                streamAnswer(request.getQuestion(), context.rerankedDocs(),
+                streamAnswer(request.getQuestion(), context.rerankedDocs(), context.historyText(),
                         token -> sendEvent(emitter, "token", token));
 
                 sendEvent(emitter, "done", "[DONE]");
@@ -169,12 +177,13 @@ public class RAGService {
         return fallbackByVectorScore(validCandidates, safeTopN);
     }
 
-    public void streamAnswer(String question, List<Document> rerankedDocs, Consumer<String> tokenConsumer) {
+    public void streamAnswer(String question, List<Document> rerankedDocs, String historyText, Consumer<String> tokenConsumer) {
         String context = buildContext(rerankedDocs);
         chatClient.prompt()
                 .system(system -> system.text(answerSystemPrompt))
                 .user(u -> u.text(answerUserPrompt)
                         .param("question", question)
+                        .param("history", historyText == null || historyText.isBlank() ? "(无历史对话)" : historyText)
                         .param("context", context))
                 .stream()
                 .content()
@@ -210,6 +219,9 @@ public class RAGService {
         String originalQuestion = request.getQuestion();
         String rewritten = rewriteQuestion(originalQuestion);
         String kb = request.getKb();
+        Long sessionId = request.getSessionId();
+        String historyText = buildHistoryText(sessionId);
+        int historyTurns = countHistoryTurns(sessionId);
 
         QueryRoutingDecision routing = queryRouter.route(originalQuestion);
 
@@ -257,8 +269,53 @@ public class RAGService {
                 usedWeb,
                 ragDocsCount,
                 webCount,
-                webReason
+                webReason,
+                historyText,
+                historyTurns
         );
+    }
+
+    private String buildHistoryText(Long sessionId) {
+        if (sessionId == null) {
+            return "(无历史对话)";
+        }
+        List<ChatMessage> latest = chatMessageRepository.findTop10BySessionIdOrderByCreatedAtDesc(sessionId);
+        if (latest == null || latest.isEmpty()) {
+            return "(无历史对话)";
+        }
+        List<ChatMessage> ordered = new ArrayList<>(latest);
+        Collections.reverse(ordered);
+        StringBuilder sb = new StringBuilder();
+        for (ChatMessage m : ordered) {
+            if (m == null || m.getRole() == null) {
+                continue;
+            }
+            String role = m.getRole() == MessageRole.USER ? "用户" : "助手";
+            String content = truncate(safeMsgText(m.getContent()), 1500);
+            if (content.isBlank()) {
+                continue;
+            }
+            sb.append(role).append("：").append(content).append("\n");
+        }
+        String text = sb.toString().trim();
+        return text.isBlank() ? "(无历史对话)" : text;
+    }
+
+    private int countHistoryTurns(Long sessionId) {
+        if (sessionId == null) {
+            return 0;
+        }
+        List<ChatMessage> latest = chatMessageRepository.findTop10BySessionIdOrderByCreatedAtDesc(sessionId);
+        if (latest == null || latest.isEmpty()) {
+            return 0;
+        }
+        long userCount = latest.stream().filter(m -> m != null && m.getRole() == MessageRole.USER).count();
+        long assistantCount = latest.stream().filter(m -> m != null && m.getRole() == MessageRole.ASSISTANT).count();
+        return (int) Math.min(userCount, assistantCount);
+    }
+
+    private String safeMsgText(String content) {
+        return content == null ? "" : content.trim();
     }
 
     private void sendEvent(SseEmitter emitter, String event, Object data) {
@@ -431,6 +488,8 @@ public class RAGService {
         private final int ragDocsCount;
         private final int webResultsCount;
         private final String webFallbackReason;
+        private final String historyText;
+        private final int historyTurns;
 
         private RAGExecutionContext(String rewrittenQuestion,
                                     List<Document> rerankedDocs,
@@ -439,7 +498,9 @@ public class RAGService {
                                     boolean usedWebSearch,
                                     int ragDocsCount,
                                     int webResultsCount,
-                                    String webFallbackReason) {
+                                    String webFallbackReason,
+                                    String historyText,
+                                    int historyTurns) {
             this.rewrittenQuestion = rewrittenQuestion;
             this.rerankedDocs = rerankedDocs;
             this.references = references;
@@ -448,6 +509,8 @@ public class RAGService {
             this.ragDocsCount = ragDocsCount;
             this.webResultsCount = webResultsCount;
             this.webFallbackReason = webFallbackReason;
+            this.historyText = historyText;
+            this.historyTurns = historyTurns;
         }
 
         public String rewrittenQuestion() {
@@ -480,6 +543,14 @@ public class RAGService {
 
         public String webFallbackReason() {
             return webFallbackReason;
+        }
+
+        public String historyText() {
+            return historyText;
+        }
+
+        public int historyTurns() {
+            return historyTurns;
         }
     }
 }

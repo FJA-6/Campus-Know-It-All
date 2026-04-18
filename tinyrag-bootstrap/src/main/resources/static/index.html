@@ -2310,7 +2310,7 @@
                     'Content-Type': 'application/json',
                     Accept: 'text/event-stream'
                 },
-                body: JSON.stringify({ question, kb }),
+                body: JSON.stringify({ question, kb, sessionId: currentSessionId }),
                 signal
             });
 
