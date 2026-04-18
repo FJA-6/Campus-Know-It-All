@@ -74,6 +74,33 @@ public class RAGProperties {
     private Integer webSearchMaxResults = 5;
 
     /**
+     * 最终交给生成模型的候选片段总数（RAG + Web 合并后 rerank 输出）。
+     */
+    @Min(1)
+    @Max(20)
+    private Integer finalTopChunks = 5;
+
+    /**
+     * 当触发联网检索时，RAG 先行保留的最大片段数，避免 RAG 占满所有名额。
+     */
+    @Min(1)
+    @Max(20)
+    private Integer ragMaxChunksWhenWebEnabled = 3;
+
+    /**
+     * 当触发联网检索时，Web 侧希望保留的最少片段数（若检索端可返回）。
+     */
+    @Min(1)
+    @Max(20)
+    private Integer webMinChunksWhenWebEnabled = 2;
+
+    /**
+     * 启用“配额优先”策略：当开启联网时，尽量强制补齐 Web 配额（例如 3+2）。
+     * 若 Web 端返回为空，则最终仍可能不足配额。
+     */
+    private Boolean webQuotaPreferEnabled = Boolean.TRUE;
+
+    /**
      * 联网检索优先使用 MCP 工具（例如百度 AIsearch）。
      */
     private Boolean webSearchPreferMcp = Boolean.TRUE;

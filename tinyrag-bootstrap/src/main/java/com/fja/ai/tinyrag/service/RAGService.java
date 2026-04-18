@@ -226,46 +226,76 @@ public class RAGService {
 
         QueryRoutingDecision routing = queryRouter.route(originalQuestion);
 
-        List<Document> reranked = List.of();
-        int ragDocsCount = 0;
+        int finalTopChunks = safePositive(ragProperties.getFinalTopChunks(), 5);
+        int ragMaxWhenWeb = safePositive(ragProperties.getRagMaxChunksWhenWebEnabled(), 3);
+        int webMinWhenWeb = safePositive(ragProperties.getWebMinChunksWhenWebEnabled(), 2);
+
+        List<Document> ragDocs = List.of();
         if (routing.useRag()) {
             List<Document> candidates = retrieveCandidates(rewritten, kb, ragProperties.getRetrieveTopK());
-            reranked = rerank(originalQuestion, candidates, ragProperties.getRerankTopN());
-            ragDocsCount = reranked == null ? 0 : reranked.size();
+            // 当允许联网时，先限制 RAG 候选，给 Web 留配额
+            int ragTopN = routing != null && routing.allowWeb() ? ragMaxWhenWeb : finalTopChunks;
+            ragDocs = rerank(originalQuestion, candidates, ragTopN);
         }
+        int ragDocsCount = ragDocs == null ? 0 : ragDocs.size();
 
-        boolean needWebFallback = shouldWebFallback(routing, reranked);
+        boolean webEnabled = Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled());
+        boolean quotaPrefer = Boolean.TRUE.equals(ragProperties.getWebQuotaPreferEnabled());
+        int webDesiredByQuota = Math.max(0, finalTopChunks - Math.min(ragDocsCount, ragMaxWhenWeb));
+        boolean needWebFallback = (routing != null && routing.allowWeb()) || shouldWebFallback(routing, ragDocs);
+        if (webEnabled && quotaPrefer && webDesiredByQuota > 0) {
+            needWebFallback = true;
+        }
         boolean usedWeb = false;
         int webCount = 0;
         String webReason = needWebFallback ? "triggered-by-policy" : "not-triggered";
+        if (webEnabled && quotaPrefer && webDesiredByQuota > 0) {
+            webReason = "triggered-by-quota";
+        }
+        List<Document> finalDocs = ragDocs == null ? List.of() : ragDocs;
+
         if (needWebFallback) {
             log.info("RAG: web fallback triggered. routeReason={}, allowWeb={}, allowAutoOnEmpty={}, ragDocsCount={}",
                     routing == null ? null : routing.reason(),
                     routing != null && routing.allowWeb(),
                     Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag()),
                     ragDocsCount);
-            List<WebResult> web = webSearchService.search(rewritten, ragProperties.getWebSearchMaxResults());
+
+            int webSearchTop = Math.max(safePositive(ragProperties.getWebSearchMaxResults(), 5), Math.max(webMinWhenWeb, webDesiredByQuota));
+            List<WebResult> web = webSearchService.search(rewritten, webSearchTop);
             if (web != null && !web.isEmpty()) {
                 usedWeb = true;
                 webCount = web.size();
                 List<Document> webDocs = webResultsToDocs(web);
-                // 若 RAG 有命中但质量一般，则把联网结果作为补充；若无命中，则直接用联网结果
-                if (reranked == null || reranked.isEmpty()) {
-                    reranked = webDocs;
-                } else {
-                    List<Document> merged = new ArrayList<>(reranked.size() + webDocs.size());
-                    merged.addAll(reranked);
-                    merged.addAll(webDocs);
-                    reranked = merged;
+
+                List<Document> ragReserved = limitDocs(ragDocs, ragMaxWhenWeb);
+                List<Document> webReserved = limitDocs(webDocs, webMinWhenWeb);
+                List<Document> merged = new ArrayList<>(ragReserved.size() + webReserved.size());
+                merged.addAll(ragReserved);
+                merged.addAll(webReserved);
+
+                // 若 Web 不足最小配额，用剩余 Web 结果补齐；仍不足则允许多放一些 RAG
+                if (webDocs.size() > webReserved.size()) {
+                    merged.addAll(limitDocs(webDocs.subList(webReserved.size(), webDocs.size()), finalTopChunks));
                 }
+                if (merged.size() < finalTopChunks && ragDocs.size() > ragReserved.size()) {
+                    merged.addAll(limitDocs(ragDocs.subList(ragReserved.size(), ragDocs.size()), finalTopChunks - merged.size()));
+                }
+                merged = limitDocs(merged, finalTopChunks);
+
+                // 合并后的 3+2 候选交给 rerank 再排序，提升最终相关性
+                finalDocs = rerank(originalQuestion, merged, finalTopChunks);
             } else {
                 webReason = "web-search-returned-empty";
                 log.warn("RAG: web fallback executed but returned empty results. rewrittenQuestion='{}'", rewritten);
+                finalDocs = limitDocs(ragDocs, finalTopChunks);
             }
+        } else {
+            finalDocs = limitDocs(ragDocs, finalTopChunks);
         }
 
-        List<String> refs = references(reranked);
-        return new RAGExecutionContext(rewritten, reranked, refs,
+        List<String> refs = references(finalDocs);
+        return new RAGExecutionContext(rewritten, finalDocs, refs,
                 routing == null ? null : routing.reason(),
                 usedWeb,
                 ragDocsCount,
@@ -317,6 +347,23 @@ public class RAGService {
 
     private String safeMsgText(String content) {
         return content == null ? "" : content.trim();
+    }
+
+    private int safePositive(Integer value, int fallback) {
+        if (value == null || value <= 0) {
+            return fallback;
+        }
+        return value;
+    }
+
+    private List<Document> limitDocs(List<Document> docs, int max) {
+        if (docs == null || docs.isEmpty() || max <= 0) {
+            return List.of();
+        }
+        if (docs.size() <= max) {
+            return docs;
+        }
+        return docs.subList(0, max);
     }
 
     private void sendEvent(SseEmitter emitter, String event, Object data) {

@@ -52,8 +52,15 @@ public class RerankService {
 
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("model", ragProperties.getRerankModel());
+        // 兼容不同 rerank 提供商：
+        // 1) 扁平结构：query/documents
+        // 2) 嵌套结构：input.query/input.documents
         request.put("query", query);
         request.put("documents", documents);
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("query", query);
+        input.put("documents", documents);
+        request.put("input", input);
         request.put("top_n", safeTopN);
         return request;
     }
