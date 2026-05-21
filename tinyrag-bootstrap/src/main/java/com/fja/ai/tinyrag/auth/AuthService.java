@@ -40,6 +40,10 @@ public class AuthService {
         String username = normalizeUsername(request.getUsername());
         UserAccount account = userAccountRepository.findByUsername(username)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "用户名或密码错误"));
+        // 兼容历史数据：enabled 为空时视为启用
+        if (account.getEnabled() != null && !account.getEnabled()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "账号已被禁用");
+        }
         if (!passwordEncoder.matches(request.getPassword(), account.getPasswordHash())) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "用户名或密码错误");
         }
@@ -59,7 +63,9 @@ public class AuthService {
         }
         Long userId = (Long) id;
         String name = (String) username;
-        return new AuthUserDto(userId, name);
+        UserAccount account = userAccountRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "未登录"));
+        return toUserDto(account);
     }
 
     private void saveLoginSession(HttpSession session, UserAccount account) {
@@ -68,7 +74,9 @@ public class AuthService {
     }
 
     private AuthUserDto toUserDto(UserAccount account) {
-        return new AuthUserDto(account.getId(), account.getUsername());
+        return new AuthUserDto(account.getId(), account.getUsername(),
+                account.getRole() == null ? UserRole.USER.name() : account.getRole().name(),
+                account.getEnabled() == null ? Boolean.TRUE : account.getEnabled());
     }
 
     private String normalizeUsername(String username) {

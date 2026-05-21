@@ -8,9 +8,12 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class WebMvcAuthConfiguration implements WebMvcConfigurer {
 
     private final AuthInterceptor authInterceptor;
+    private final AdminInterceptor adminInterceptor;
 
-    public WebMvcAuthConfiguration(AuthInterceptor authInterceptor) {
+    public WebMvcAuthConfiguration(AuthInterceptor authInterceptor,
+                                   AdminInterceptor adminInterceptor) {
         this.authInterceptor = authInterceptor;
+        this.adminInterceptor = adminInterceptor;
     }
 
     @Override
@@ -19,6 +22,13 @@ public class WebMvcAuthConfiguration implements WebMvcConfigurer {
                 .addPathPatterns("/api/**")
                 .excludePathPatterns(
                         "/api/auth/**"
+                );
+
+        // 管理员能力：仅 ADMIN 可访问
+        registry.addInterceptor(adminInterceptor)
+                .addPathPatterns(
+                        "/api/admin/**",
+                        "/api/rag/knowledge/**"
                 );
     }
 }

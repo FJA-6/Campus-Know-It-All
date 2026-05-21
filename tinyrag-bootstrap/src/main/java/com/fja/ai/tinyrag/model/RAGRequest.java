@@ -17,4 +17,9 @@ public class RAGRequest {
      * 可选：会话 ID，用于拼接最近历史记忆（最近 5 轮问答）。
      */
     private Long sessionId;
+
+    /**
+     * 演示/后台调试开关：强制允许联网补充检索。
+     */
+    private Boolean forceWebSearch;
 }

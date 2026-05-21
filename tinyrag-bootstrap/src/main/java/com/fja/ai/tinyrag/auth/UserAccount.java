@@ -2,6 +2,8 @@ package com.fja.ai.tinyrag.auth;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -28,6 +30,14 @@ public class UserAccount {
     @Column(nullable = false, length = 128)
     private String passwordHash;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private UserRole role = UserRole.USER;
+
+    /** 账号是否可用（禁用后仍可保留数据，但无法登录/访问受保护接口） */
+    @Column(nullable = false)
+    private Boolean enabled = Boolean.TRUE;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -39,6 +49,12 @@ public class UserAccount {
         Instant now = Instant.now();
         createdAt = now;
         updatedAt = now;
+        if (role == null) {
+            role = UserRole.USER;
+        }
+        if (enabled == null) {
+            enabled = Boolean.TRUE;
+        }
     }
 
     @PreUpdate

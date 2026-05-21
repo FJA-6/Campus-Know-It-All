@@ -1421,7 +1421,7 @@
                 <p id="sessionHistoryEmpty" class="sidebar-history-placeholder">暂无历史，对话将保存到数据库</p>
             </div>
             <div class="sidebar-footer">
-                <a class="sidebar-admin-btn" href="/admin-upload.html" title="管理员：向知识库上传资料">资料上传 · 管理</a>
+                <a class="sidebar-admin-btn" href="/admin.html" title="管理员后台">管理后台 · 控制台</a>
             </div>
         </aside>
 
@@ -1433,8 +1433,9 @@
                         <button type="button" class="icon-btn" id="newChatTopBtn" title="新对话" aria-label="新对话">＋</button>
                     </div>
                     <span class="chat-topbar-title" id="chatSessionTitle">新对话</span>
-                    <div class="chat-topbar-right">
+                <div class="chat-topbar-right">
                         <span id="loginUser" class="user-badge">未登录</span>
+                        <a id="adminConsoleBtn" class="logout-btn" href="/admin.html" style="display:none; text-decoration:none;">后台</a>
                         <button id="logoutBtn" class="logout-btn" type="button">退出</button>
                         <span id="globalStatus" class="status-pill">空闲</span>
                     </div>
@@ -1925,6 +1926,13 @@
             const user = await res.json();
             if (loginUserEl) {
                 loginUserEl.textContent = user?.username ? `用户：${user.username}` : '已登录';
+            }
+
+            // 仅管理员显示“后台”入口
+            const adminBtn = document.getElementById('adminConsoleBtn');
+            if (adminBtn) {
+                const isAdmin = String(user?.role || '').toUpperCase() === 'ADMIN';
+                adminBtn.style.display = isAdmin ? '' : 'none';
             }
         } catch {
             window.location.href = '/login.html';

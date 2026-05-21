@@ -3,6 +3,7 @@ package com.fja.ai.tinyrag.service;
 import com.fja.ai.tinyrag.chat.ChatMessage;
 import com.fja.ai.tinyrag.chat.ChatMessageRepository;
 import com.fja.ai.tinyrag.chat.MessageRole;
+import com.fja.ai.tinyrag.admin.DynamicSettingsService;
 import com.fja.ai.tinyrag.config.RAGProperties;
 import com.fja.ai.tinyrag.model.RAGRequest;
 import com.fja.ai.tinyrag.service.RerankService.RerankItem;
@@ -48,6 +49,7 @@ public class RAGService {
     private final QueryRouter queryRouter;
     private final WebSearchService webSearchService;
     private final ChatMessageRepository chatMessageRepository;
+    private final DynamicSettingsService dynamicSettingsService;
     private final Resource rewriteSystemPrompt;
     private final Resource rewriteUserPrompt;
     private final Resource answerSystemPrompt;
@@ -61,6 +63,7 @@ public class RAGService {
                       QueryRouter queryRouter,
                       WebSearchService webSearchService,
                       ChatMessageRepository chatMessageRepository,
+                      DynamicSettingsService dynamicSettingsService,
                       @Value("classpath:/prompts/rewrite-system.st") Resource rewriteSystemPrompt,
                       @Value("classpath:/prompts/rewrite-user.st") Resource rewriteUserPrompt,
                       @Value("classpath:/prompts/answer-system.st") Resource answerSystemPrompt,
@@ -73,6 +76,7 @@ public class RAGService {
         this.queryRouter = queryRouter;
         this.webSearchService = webSearchService;
         this.chatMessageRepository = chatMessageRepository;
+        this.dynamicSettingsService = dynamicSettingsService;
         this.rewriteSystemPrompt = rewriteSystemPrompt;
         this.rewriteUserPrompt = rewriteUserPrompt;
         this.answerSystemPrompt = answerSystemPrompt;
@@ -226,9 +230,15 @@ public class RAGService {
 
         QueryRoutingDecision routing = queryRouter.route(originalQuestion);
 
-        int finalTopChunks = safePositive(ragProperties.getFinalTopChunks(), 5);
-        int ragMaxWhenWeb = safePositive(ragProperties.getRagMaxChunksWhenWebEnabled(), 3);
-        int webMinWhenWeb = safePositive(ragProperties.getWebMinChunksWhenWebEnabled(), 2);
+        int finalTopChunks = safePositive(dynamicSettingsService.getInt(
+                "app.rag.finalTopChunks",
+                ragProperties.getFinalTopChunks() == null ? 5 : ragProperties.getFinalTopChunks()), 5);
+        int ragMaxWhenWeb = safePositive(dynamicSettingsService.getInt(
+                "app.rag.ragMaxChunksWhenWebEnabled",
+                ragProperties.getRagMaxChunksWhenWebEnabled() == null ? 3 : ragProperties.getRagMaxChunksWhenWebEnabled()), 3);
+        int webMinWhenWeb = safePositive(dynamicSettingsService.getInt(
+                "app.rag.webMinChunksWhenWebEnabled",
+                ragProperties.getWebMinChunksWhenWebEnabled() == null ? 2 : ragProperties.getWebMinChunksWhenWebEnabled()), 2);
 
         List<Document> ragDocs = List.of();
         if (routing.useRag()) {
@@ -239,11 +249,20 @@ public class RAGService {
         }
         int ragDocsCount = ragDocs == null ? 0 : ragDocs.size();
 
-        boolean webEnabled = Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled());
-        boolean quotaPrefer = Boolean.TRUE.equals(ragProperties.getWebQuotaPreferEnabled());
+        boolean webEnabled = dynamicSettingsService.getBool(
+                "app.rag.webFallbackEnabled",
+                Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled()));
+        boolean quotaPrefer = dynamicSettingsService.getBool(
+                "app.rag.webQuotaPreferEnabled",
+                Boolean.TRUE.equals(ragProperties.getWebQuotaPreferEnabled()));
         int webDesiredByQuota = Math.max(0, finalTopChunks - Math.min(ragDocsCount, ragMaxWhenWeb));
         boolean needWebFallback = (routing != null && routing.allowWeb()) || shouldWebFallback(routing, ragDocs);
         if (webEnabled && quotaPrefer && webDesiredByQuota > 0) {
+            needWebFallback = true;
+        }
+
+        // 后台演示开关：强制联网
+        if (Boolean.TRUE.equals(request.getForceWebSearch())) {
             needWebFallback = true;
         }
         boolean usedWeb = false;
@@ -252,16 +271,24 @@ public class RAGService {
         if (webEnabled && quotaPrefer && webDesiredByQuota > 0) {
             webReason = "triggered-by-quota";
         }
+        if (Boolean.TRUE.equals(request.getForceWebSearch())) {
+            webReason = "triggered-by-admin-force";
+        }
         List<Document> finalDocs = ragDocs == null ? List.of() : ragDocs;
 
         if (needWebFallback) {
             log.info("RAG: web fallback triggered. routeReason={}, allowWeb={}, allowAutoOnEmpty={}, ragDocsCount={}",
                     routing == null ? null : routing.reason(),
                     routing != null && routing.allowWeb(),
-                    Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag()),
+                    dynamicSettingsService.getBool(
+                            "app.rag.allowWebFallbackOnEmptyRag",
+                            Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag())),
                     ragDocsCount);
 
-            int webSearchTop = Math.max(safePositive(ragProperties.getWebSearchMaxResults(), 5), Math.max(webMinWhenWeb, webDesiredByQuota));
+            int webMax = safePositive(dynamicSettingsService.getInt(
+                    "app.rag.webSearchMaxResults",
+                    ragProperties.getWebSearchMaxResults() == null ? 5 : ragProperties.getWebSearchMaxResults()), 5);
+            int webSearchTop = Math.max(webMax, Math.max(webMinWhenWeb, webDesiredByQuota));
             List<WebResult> web = webSearchService.search(rewritten, webSearchTop);
             if (web != null && !web.isEmpty()) {
                 usedWeb = true;
@@ -474,21 +501,24 @@ public class RAGService {
     }
 
     private boolean shouldWebFallback(QueryRoutingDecision routing, List<Document> rerankedDocs) {
-        if (!Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled())) {
+        boolean webEnabled = dynamicSettingsService.getBool(
+                "app.rag.webFallbackEnabled",
+                Boolean.TRUE.equals(ragProperties.getWebFallbackEnabled()));
+        if (!webEnabled) {
             return false;
         }
 
         boolean allowWeb = routing != null && routing.allowWeb();
-        boolean allowAutoOnEmpty = Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag());
+        boolean allowAutoOnEmpty = dynamicSettingsService.getBool(
+                "app.rag.allowWebFallbackOnEmptyRag",
+                Boolean.TRUE.equals(ragProperties.getAllowWebFallbackOnEmptyRag()));
 
         if (rerankedDocs == null || rerankedDocs.isEmpty()) {
             return allowWeb || allowAutoOnEmpty;
         }
 
-        Double minScore = ragProperties.getRagMinTopScore();
-        if (minScore == null) {
-            return allowWeb;
-        }
+        double defaultMinScore = ragProperties.getRagMinTopScore() == null ? 0.35 : ragProperties.getRagMinTopScore();
+        double minScore = dynamicSettingsService.getDouble("app.rag.ragMinTopScore", defaultMinScore);
         double top = topScore(rerankedDocs);
         // 若拿不到分数（全是 0），只在用户显式 web-hint 时回退，避免无意义联网
         if (top <= 0.0) {

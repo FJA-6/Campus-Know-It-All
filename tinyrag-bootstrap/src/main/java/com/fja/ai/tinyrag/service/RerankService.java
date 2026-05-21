@@ -3,6 +3,7 @@ package com.fja.ai.tinyrag.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fja.ai.tinyrag.admin.DynamicSettingsService;
 import com.fja.ai.tinyrag.config.RAGProperties;
 
 import java.util.ArrayList;
@@ -21,13 +22,16 @@ import org.springframework.web.client.RestClient;
 public class RerankService {
 
     private final RAGProperties ragProperties;
+    private final DynamicSettingsService dynamicSettingsService;
     private final RestClient restClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final String apiKey;
 
     public RerankService(RAGProperties ragProperties,
+                         DynamicSettingsService dynamicSettingsService,
                          @Value("${spring.ai.openai.api-key:}") String apiKey) {
         this.ragProperties = ragProperties;
+        this.dynamicSettingsService = dynamicSettingsService;
         this.apiKey = apiKey;
         this.restClient = RestClient.builder().build();
     }
@@ -39,11 +43,12 @@ public class RerankService {
         if (!StringUtils.hasText(apiKey) || "your-api-key".equalsIgnoreCase(apiKey.trim())) {
             throw new IllegalStateException("Rerank API Key 未配置，无法执行 rerank");
         }
-        if (!StringUtils.hasText(ragProperties.getRerankEndpoint())) {
+        String endpoint = dynamicSettingsService.getString("app.rag.rerankEndpoint", ragProperties.getRerankEndpoint());
+        if (!StringUtils.hasText(endpoint)) {
             throw new IllegalStateException("Rerank endpoint 未配置，无法执行 rerank");
         }
 
-        JsonNode body = callRerankApi(buildRequest(query, documents, topN));
+        JsonNode body = callRerankApi(endpoint, buildRequest(query, documents, topN));
         return parseResults(body);
     }
 
@@ -51,7 +56,8 @@ public class RerankService {
         int safeTopN = Math.max(1, Math.min(topN, documents.size()));
 
         Map<String, Object> request = new LinkedHashMap<>();
-        request.put("model", ragProperties.getRerankModel());
+        String model = dynamicSettingsService.getString("app.rag.rerankModel", ragProperties.getRerankModel());
+        request.put("model", model);
         // 兼容不同 rerank 提供商：
         // 1) 扁平结构：query/documents
         // 2) 嵌套结构：input.query/input.documents
@@ -65,9 +71,9 @@ public class RerankService {
         return request;
     }
 
-    private JsonNode callRerankApi(Map<String, Object> requestBody) {
+    private JsonNode callRerankApi(String endpoint, Map<String, Object> requestBody) {
         String responseBody = restClient.post()
-                .uri(ragProperties.getRerankEndpoint())
+                .uri(endpoint)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBody)
